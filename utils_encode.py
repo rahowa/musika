@@ -6,7 +6,7 @@ from pydub import AudioSegment
 from glob import glob
 from tqdm import tqdm
 
-from utils import Utils_functions
+from musika.utils import Utils_functions
 
 
 class UtilsEncode_functions:
@@ -16,8 +16,8 @@ class UtilsEncode_functions:
         self.U = Utils_functions(args)
         self.paths = sorted(glob(self.args.files_path + "/*"))
 
-    def audio_generator(self):
-        for p in self.paths:
+    def audio_generator(self, paths):
+        for p in paths:
             try:
                 tp, ext = os.path.splitext(p)
                 bname = os.path.basename(tp)
@@ -33,113 +33,100 @@ class UtilsEncode_functions:
                 print("Exception ignored! Continuing...")
                 pass
 
-    # def create_dataset(self):
-    #     self.ds = (
-    #         tf.data.Dataset.from_generator(
-    #             self.audio_generator, output_signature=(tf.TensorSpec(shape=(None, 2), dtype=tf.float32))
-    #         )
-    #         .prefetch(tf.data.experimental.AUTOTUNE)
-    #         .apply(tf.data.experimental.ignore_errors())
-    #     )
-
-    def compress_files(self, models_ls=None):
+    def compress_files(self, models_ls):
         critic, gen, enc, dec, enc2, dec2, gen_ema, [opt_dec, opt_disc], switch = models_ls
         # self.create_dataset()
         os.makedirs(self.args.save_path, exist_ok=True)
+        
+        pbar = tqdm(self.audio_generator(self.paths), position=0, leave=True, total=len(self.paths))
         c = 0
+        for (wv, bname) in pbar:
+            lat_codes = self.compress_single_file(wv, enc, enc2)
+            self.save_latent_codes(lat_codes, bname, c)
+            pbar.set_postfix({"Saved Files": c})
+
+    def compress_single_file(self, wv, enc, enc2):
         time_compression_ratio = 16  # TODO: infer time compression ratio
         shape2 = self.args.shape
-        pbar = tqdm(self.audio_generator(), position=0, leave=True, total=len(self.paths))
+        try:
+            if wv.shape[0] > self.args.hop * self.args.shape * 2 + 3 * self.args.hop:
+                split_limit = (
+                    5 * 60 * self.args.sr
+                )  # split very long waveforms (> 5 minutes) and process separately to avoid out of memory errors
 
-        for (wv,bname) in pbar:
+                nsplits = (wv.shape[0] // split_limit) + 1
+                wvsplits = []
+                for ns in range(nsplits):
+                    if wv.shape[0] - (ns * split_limit) > self.args.hop * self.args.shape * 2 + 3 * self.args.hop:
+                        wvsplits.append(wv[ns * split_limit : (ns + 1) * split_limit, :])
 
-            try:
+                for wv in wvsplits:
+                    wv = tf.image.random_crop(
+                        wv,
+                        size=[
+                            (((wv.shape[0] - (3 * self.args.hop)) // (self.args.shape * self.args.hop)))
+                            * self.args.shape
+                            * self.args.hop
+                            + 3 * self.args.hop,
+                            2,
+                        ],
+                    )
+                    
+                    chls = []
+                    for channel in range(2):
 
-                if wv.shape[0] > self.args.hop * self.args.shape * 2 + 3 * self.args.hop:
+                        x = wv[:, channel]
+                        x = tf.expand_dims(tf.transpose(self.U.wv2spec(x, hop_size=self.args.hop), (1, 0)), -1)
+                        ds = []
+                        num = x.shape[1] // self.args.shape
+                        rn = 0
+                        for i in range(num):
+                            ds.append(
+                                x[:, rn + (i * self.args.shape) : rn + (i * self.args.shape) + self.args.shape, :]
+                            )
+                        del x
+                        ds = tf.convert_to_tensor(ds, dtype=tf.float32)
+                        lat = self.U.distribute_enc(ds, enc)
+                        del ds
+                        lat = tf.split(lat, lat.shape[0], 0)
+                        lat = tf.concat(lat, -2)
+                        lat = tf.squeeze(lat)
 
-                    split_limit = (
-                        5 * 60 * self.args.sr
-                    )  # split very long waveforms (> 5 minutes) and process separately to avoid out of memory errors
-
-                    nsplits = (wv.shape[0] // split_limit) + 1
-                    wvsplits = []
-                    for ns in range(nsplits):
-                        if wv.shape[0] - (ns * split_limit) > self.args.hop * self.args.shape * 2 + 3 * self.args.hop:
-                            wvsplits.append(wv[ns * split_limit : (ns + 1) * split_limit, :])
-
-                    for wv in wvsplits:
-
-                        wv = tf.image.random_crop(
-                            wv,
-                            size=[
-                                (((wv.shape[0] - (3 * self.args.hop)) // (self.args.shape * self.args.hop)))
-                                * self.args.shape
-                                * self.args.hop
-                                + 3 * self.args.hop,
-                                2,
-                            ],
-                        )
-
-                        chls = []
-                        for channel in range(2):
-
-                            x = wv[:, channel]
-                            x = tf.expand_dims(tf.transpose(self.U.wv2spec(x, hop_size=self.args.hop), (1, 0)), -1)
-                            ds = []
-                            num = x.shape[1] // self.args.shape
-                            rn = 0
-                            for i in range(num):
-                                ds.append(
-                                    x[:, rn + (i * self.args.shape) : rn + (i * self.args.shape) + self.args.shape, :]
-                                )
-                            del x
-                            ds = tf.convert_to_tensor(ds, dtype=tf.float32)
-                            lat = self.U.distribute_enc(ds, enc)
-                            del ds
+                        switch = False
+                        if lat.shape[0] > (self.args.max_lat_len * time_compression_ratio):
+                            switch = True
+                            ds2 = []
+                            num2 = lat.shape[-2] // shape2
+                            rn2 = 0
+                            for j in range(num2):
+                                ds2.append(lat[rn2 + (j * shape2) : rn2 + (j * shape2) + shape2, :])
+                            ds2 = tf.convert_to_tensor(ds2, dtype=tf.float32)
+                            lat = self.U.distribute_enc(tf.expand_dims(ds2, -3), enc2)
+                            del ds2
                             lat = tf.split(lat, lat.shape[0], 0)
                             lat = tf.concat(lat, -2)
                             lat = tf.squeeze(lat)
+                            chls.append(lat)
 
-                            switch = False
-                            if lat.shape[0] > (self.args.max_lat_len * time_compression_ratio):
-                                switch = True
-                                ds2 = []
-                                num2 = lat.shape[-2] // shape2
-                                rn2 = 0
-                                for j in range(num2):
-                                    ds2.append(lat[rn2 + (j * shape2) : rn2 + (j * shape2) + shape2, :])
-                                ds2 = tf.convert_to_tensor(ds2, dtype=tf.float32)
-                                lat = self.U.distribute_enc(tf.expand_dims(ds2, -3), enc2)
-                                del ds2
-                                lat = tf.split(lat, lat.shape[0], 0)
-                                lat = tf.concat(lat, -2)
-                                lat = tf.squeeze(lat)
-                                chls.append(lat)
+                    if lat.shape[0] > self.args.max_lat_len and switch:
 
-                        if lat.shape[0] > self.args.max_lat_len and switch:
+                        lat = tf.concat(chls, -1)
+                        
+                        del chls
+                        latc = lat[: (lat.shape[0] // self.args.max_lat_len) * self.args.max_lat_len, :]
+                        latc = tf.split(latc, latc.shape[0] // self.args.max_lat_len, 0)
+                        all_codes = [l for l in latc] + lat[-self.args.max_lat_len :, :]
+                        return all_codes
 
-                            lat = tf.concat(chls, -1)
-
-                            del chls
-
-                            latc = lat[: (lat.shape[0] // self.args.max_lat_len) * self.args.max_lat_len, :]
-                            latc = tf.split(latc, latc.shape[0] // self.args.max_lat_len, 0)
-                            for el in latc:
-                                np.save(self.args.save_path + f"/{bname}_{c}.npy", el)
-                                c += 1
-                                pbar.set_postfix({"Saved Files": c})
-                            np.save(self.args.save_path + f"/{bname}_{c}.npy", lat[-self.args.max_lat_len :, :])
-                            c += 1
-                            pbar.set_postfix({"Saved Files": c})
-
-                            del lat
-                            del latc
-
-            except Exception as e:
-                print(e)
-                print("Exception ignored! Continuing...")
-                pass
-
+        except Exception as e:
+            print(e)
+            print("Exception ignored! Continuing...")
+            pass
+        
+    def save_latent_codes(self, latc, bname, c):
+        for el in latc:
+            np.save(self.args.save_path + f"/{bname}_{c}.npy", el)
+            c += 1
 
     def compress_whole_files(self, models_ls=None):
         critic, gen, enc, dec, enc2, dec2, gen_ema, [opt_dec, opt_disc], switch = models_ls
@@ -148,7 +135,7 @@ class UtilsEncode_functions:
         c = 0
         time_compression_ratio = 16  # TODO: infer time compression ratio
         shape2 = self.args.shape
-        pbar = tqdm(self.audio_generator(), position=0, leave=True, total=len(self.paths))
+        pbar = tqdm(self.audio_generator(self.paths), position=0, leave=True, total=len(self.paths))
 
         for (wv,bname) in pbar:
 

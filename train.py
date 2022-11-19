@@ -1,14 +1,13 @@
 import tensorflow as tf
-import tensorboard
 import numpy as np
 from tqdm import tqdm
 import time
 import datetime
 import os
 import subprocess
-from utils import Utils_functions
-from models import Models_functions
-from losses import *
+from musika.utils import Utils_functions
+from musika.models import Models_functions
+from musika.losses import *
 
 
 class Train_functions:

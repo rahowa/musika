@@ -2,11 +2,11 @@ import os
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 
-from parse.parse_train import parse_args
-from data import Data_functions
-from models import Models_functions
-from utils import Utils_functions
-from train import Train_functions
+from musika.parse.parse_train import parse_args
+from musika.data import Data_functions
+from musika.models import Models_functions
+from musika.utils import Utils_functions
+from musika.train import Train_functions
 
 if __name__ == "__main__":
 

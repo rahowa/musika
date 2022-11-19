@@ -2,9 +2,9 @@ import os
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 
-from parse.parse_decode import parse_args
-from models import Models_functions
-from utils import Utils_functions
+from musika.parse.parse_decode import parse_args
+from musika.models import Models_functions
+from musika.utils import Utils_functions
 
 if __name__ == "__main__":
 

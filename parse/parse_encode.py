@@ -1,3 +1,4 @@
+import os 
 import argparse
 from typing import Any
 import tensorflow as tf
@@ -31,6 +32,12 @@ def str2bool(v):
 def params_args(args):
     parser = argparse.ArgumentParser()
 
+    parser.add_argument(
+        "--download-models",
+        type=str2bool,
+        default=False,
+        help="If True, downloads pretrained models",
+    )
     parser.add_argument(
         "--whole",
         type=str2bool,
